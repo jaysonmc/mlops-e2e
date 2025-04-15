@@ -12,6 +12,7 @@ import { CfnOutput, Stack } from 'aws-cdk-lib';
 
 export interface SageMakerConstructProps {
     readonly dataBucket: s3.Bucket;
+    readonly projectName?: string;
 }
 
 /**
@@ -25,6 +26,10 @@ export class SageMakerConstruct extends Construct {
 
     constructor(scope: Construct, id: string, props: SageMakerConstructProps) {
         super(scope, id);
+
+        // Use provided project name or default to 'mlops-e2e'
+        const projectName = props.projectName || 'mlops-e2e';
+        const modelPackageGroupName = 'AbaloneModelPackageGroup';
 
         this.sagemakerArtifactBucket = new s3.Bucket(this, 'SageMakerArtifactBucket', {
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -57,7 +62,7 @@ export class SageMakerConstruct extends Construct {
             displayName: 'Model Approval Notifications',
         });
 
-        // Create a simple SageMaker pipeline with just an approval step
+        // Create a SageMaker pipeline with training and manual approval steps
         this.modelApprovalPipeline = new sagemaker.CfnPipeline(this, 'ModelApprovalPipeline', {
             pipelineName: 'model-approval-pipeline',
             pipelineDefinition: {
@@ -65,11 +70,45 @@ export class SageMakerConstruct extends Construct {
                     Version: '2020-12-01',
                     Steps: [
                         {
-                            Name: 'ModelApprovalStep',
-                            Type: 'Callback',
-                            CallbackConfig: {
-                                OutputPath: `s3://${this.sagemakerArtifactBucket.bucketName}/pipeline-outputs/approval-output/`,
+                            Name: 'TrainingStep',
+                            Type: 'Training',
+                            Arguments: {
+                                AlgorithmSpecification: {
+                                    TrainingImage:
+                                        '683313688378.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.0-1',
+                                    TrainingInputMode: 'File',
+                                },
+                                InputDataConfig: [
+                                    {
+                                        ChannelName: 'train',
+                                        DataSource: {
+                                            S3DataSource: {
+                                                S3Uri: `s3://${this.sagemakerArtifactBucket.bucketName}/data/train`,
+                                                S3DataType: 'S3Prefix',
+                                                S3DataDistributionType: 'FullyReplicated',
+                                            },
+                                        },
+                                        ContentType: 'text/csv',
+                                    },
+                                ],
+                                OutputDataConfig: {
+                                    S3OutputPath: `s3://${this.sagemakerArtifactBucket.bucketName}/output`,
+                                },
+                                ResourceConfig: {
+                                    InstanceType: 'ml.m5.large',
+                                    InstanceCount: 1,
+                                    VolumeSizeInGB: 10,
+                                },
+                                StoppingCondition: {
+                                    MaxRuntimeInSeconds: 3600,
+                                },
                             },
+                        },
+                        {
+                            Name: 'ManualApprovalStep',
+                            Type: 'Approval',
+                            Description: 'Manual approval step for the model',
+                            DependsOn: ['TrainingStep'],
                         },
                     ],
                 }),
@@ -77,23 +116,23 @@ export class SageMakerConstruct extends Construct {
             roleArn: this.sagemakerExecutionRole.roleArn,
         });
 
-        // Create EventBridge rule to trigger when a model is registered
+        // Get the current stack
+        const stack = Stack.of(this);
+
+        // Create EventBridge rule to trigger when a model is registered in the model registry
         const modelRegistryRule = new events.Rule(this, 'ModelRegistryRule', {
             eventPattern: {
                 source: ['aws.sagemaker'],
                 detailType: ['SageMaker Model Package State Change'],
                 detail: {
-                    ModelApprovalStatus: ['PendingManualApproval', 'Approved'],
+                    ModelPackageGroupName: [modelPackageGroupName],
                 },
             },
             description: 'Rule to trigger when a model is registered in the SageMaker Model Registry',
         });
 
-        // Get the current stack
-        const stack = Stack.of(this);
-
-        // Create a Lambda function to start the SageMaker pipeline
-        const pipelineStarterFunction = new lambda.Function(this, 'PipelineStarterFunction', {
+        // Create a Lambda function to handle model registry events and trigger the SageMaker pipeline
+        const modelRegistryHandler = new lambda.Function(this, 'ModelRegistryHandler', {
             runtime: lambda.Runtime.NODEJS_18_X,
             handler: 'index.handler',
             code: lambda.Code.fromInline(`
@@ -106,30 +145,28 @@ export class SageMakerConstruct extends Construct {
                     try {
                         // Extract model package details from the event
                         const modelPackageArn = event.detail.ModelPackageArn;
-                        const modelPackageGroupName = event.detail.ModelPackageGroupName;
                         const modelApprovalStatus = event.detail.ModelApprovalStatus;
                         
-                        console.log(\`Starting pipeline for model: \${modelPackageGroupName}, status: \${modelApprovalStatus}\`);
+                        console.log(\`Model package \${modelPackageArn} has status: \${modelApprovalStatus}\`);
                         
-                        // Start the SageMaker pipeline
+                        // Get the project name from environment variable
+                        const projectName = process.env.PROJECT_NAME;
+                        
+                        // Start the SageMaker pipeline with the model package ARN
                         const startPipelineResponse = await sagemaker.startPipelineExecution({
-                            PipelineName: 'model-approval-pipeline',
+                            PipelineName: projectName,
                             PipelineParameters: [
                                 {
-                                    Name: 'ModelPackageArn',
-                                    Value: modelPackageArn
-                                },
-                                {
                                     Name: 'ModelApprovalStatus',
-                                    Value: modelApprovalStatus
+                                    Value: 'Approved'
                                 }
                             ]
                         }).promise();
                         
-                        console.log('Pipeline started:', startPipelineResponse);
+                        console.log(\`Pipeline \${projectName} started: \${startPipelineResponse.PipelineExecutionArn}\`);
                         return {
                             statusCode: 200,
-                            body: JSON.stringify('Pipeline started successfully'),
+                            body: JSON.stringify('Pipeline execution started successfully')
                         };
                     } catch (error) {
                         console.error('Error starting pipeline:', error);
@@ -137,20 +174,30 @@ export class SageMakerConstruct extends Construct {
                     }
                 };
             `),
+            environment: {
+                PROJECT_NAME: projectName
+            },
         });
 
         // Grant the Lambda function permission to start the SageMaker pipeline
-        pipelineStarterFunction.addToRolePolicy(
+        modelRegistryHandler.addToRolePolicy(
             new iam.PolicyStatement({
-                actions: ['sagemaker:StartPipelineExecution', 'sagemaker:DescribePipelineExecution'],
-                resources: [`arn:aws:sagemaker:${stack.region}:${stack.account}:pipeline/model-approval-pipeline`],
+                actions: [
+                    'sagemaker:StartPipelineExecution',
+                    'sagemaker:DescribePipelineExecution',
+                    'sagemaker:DescribePipeline',
+                ],
+                resources: [
+                    `arn:aws:sagemaker:${stack.region}:${stack.account}:pipeline/${projectName}`,
+                    `arn:aws:sagemaker:${stack.region}:${stack.account}:pipeline/${projectName}/*`,
+                ],
             })
         );
 
         // Add the Lambda function as a target for the EventBridge rule
-        modelRegistryRule.addTarget(new targets.LambdaFunction(pipelineStarterFunction));
+        modelRegistryRule.addTarget(new targets.LambdaFunction(modelRegistryHandler));
 
-        // Add SNS topic as a target for the EventBridge rule
+        // Add SNS topic as a target for the EventBridge rule for notifications
         modelRegistryRule.addTarget(new targets.SnsTopic(this.modelApprovalTopic));
 
         // Output the SNS topic ARN

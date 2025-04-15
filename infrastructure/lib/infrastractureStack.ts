@@ -16,6 +16,7 @@ export class InfrastractureStack extends Stack {
 
         const sageMaker = new SageMakerConstruct(this, 'SageMakerConstruct', {
             dataBucket: dataSource.dataBucket,
+            projectName: props.projectName,
         });
 
         const codePipeline = new CodePipelineConstruct(this, 'CodePipeline', {
