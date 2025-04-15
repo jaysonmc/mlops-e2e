@@ -175,7 +175,7 @@ export class SageMakerConstruct extends Construct {
                 };
             `),
             environment: {
-                PROJECT_NAME: projectName
+                PROJECT_NAME: projectName,
             },
         });
 
