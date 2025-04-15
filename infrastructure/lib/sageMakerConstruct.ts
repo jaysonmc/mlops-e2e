@@ -22,7 +22,7 @@ export class SageMakerConstruct extends Construct {
     readonly sagemakerArtifactBucket: s3.Bucket;
     readonly modelApprovalTopic: sns.Topic;
     readonly modelApprovalPipeline: sagemaker.CfnPipeline;
-    
+
     constructor(scope: Construct, id: string, props: SageMakerConstructProps) {
         super(scope, id);
 
@@ -51,12 +51,12 @@ export class SageMakerConstruct extends Construct {
                 Resource: [this.sagemakerArtifactBucket.bucketArn, `${this.sagemakerArtifactBucket.bucketArn}/*`],
             })
         );
-        
+
         // Create SNS topic for model approval notifications
         this.modelApprovalTopic = new sns.Topic(this, 'ModelApprovalTopic', {
             displayName: 'Model Approval Notifications',
         });
-        
+
         // Create a simple SageMaker pipeline with just an approval step
         this.modelApprovalPipeline = new sagemaker.CfnPipeline(this, 'ModelApprovalPipeline', {
             pipelineName: 'model-approval-pipeline',
@@ -76,7 +76,7 @@ export class SageMakerConstruct extends Construct {
             },
             roleArn: this.sagemakerExecutionRole.roleArn,
         });
-        
+
         // Create EventBridge rule to trigger when a model is registered
         const modelRegistryRule = new events.Rule(this, 'ModelRegistryRule', {
             eventPattern: {
@@ -88,10 +88,10 @@ export class SageMakerConstruct extends Construct {
             },
             description: 'Rule to trigger when a model is registered in the SageMaker Model Registry',
         });
-        
+
         // Get the current stack
         const stack = Stack.of(this);
-        
+
         // Create a Lambda function to start the SageMaker pipeline
         const pipelineStarterFunction = new lambda.Function(this, 'PipelineStarterFunction', {
             runtime: lambda.Runtime.NODEJS_18_X,
@@ -138,7 +138,7 @@ export class SageMakerConstruct extends Construct {
                 };
             `),
         });
-        
+
         // Grant the Lambda function permission to start the SageMaker pipeline
         pipelineStarterFunction.addToRolePolicy(
             new iam.PolicyStatement({
@@ -146,20 +146,20 @@ export class SageMakerConstruct extends Construct {
                 resources: [`arn:aws:sagemaker:${stack.region}:${stack.account}:pipeline/model-approval-pipeline`],
             })
         );
-        
+
         // Add the Lambda function as a target for the EventBridge rule
         modelRegistryRule.addTarget(new targets.LambdaFunction(pipelineStarterFunction));
-        
+
         // Add SNS topic as a target for the EventBridge rule
         modelRegistryRule.addTarget(new targets.SnsTopic(this.modelApprovalTopic));
-        
+
         // Output the SNS topic ARN
         new CfnOutput(this, 'ModelApprovalTopicArn', {
             value: this.modelApprovalTopic.topicArn,
             description: 'ARN of the SNS topic for model approval notifications',
             exportName: 'ModelApprovalTopicArn',
         });
-        
+
         // Output the pipeline name
         new CfnOutput(this, 'ModelApprovalPipelineName', {
             value: 'model-approval-pipeline',
