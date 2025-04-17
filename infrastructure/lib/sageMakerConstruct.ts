@@ -62,58 +62,39 @@ export class SageMakerConstruct extends Construct {
             displayName: 'Model Approval Notifications',
         });
 
-        // Create a SageMaker pipeline with training and manual approval steps
+        // Create a simple SageMaker pipeline with a parameter and a step
         this.modelApprovalPipeline = new sagemaker.CfnPipeline(this, 'ModelApprovalPipeline', {
             pipelineName: 'model-approval-pipeline',
-            pipelineDefinition: {
-                PipelineDefinitionBody: JSON.stringify({
-                    Version: '2020-12-01',
-                    Steps: [
-                        {
-                            Name: 'TrainingStep',
-                            Type: 'Training',
-                            Arguments: {
-                                AlgorithmSpecification: {
-                                    TrainingImage:
-                                        '683313688378.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.0-1',
-                                    TrainingInputMode: 'File',
-                                },
-                                InputDataConfig: [
-                                    {
-                                        ChannelName: 'train',
-                                        DataSource: {
-                                            S3DataSource: {
-                                                S3Uri: `s3://${this.sagemakerArtifactBucket.bucketName}/data/train`,
-                                                S3DataType: 'S3Prefix',
-                                                S3DataDistributionType: 'FullyReplicated',
-                                            },
-                                        },
-                                        ContentType: 'text/csv',
-                                    },
-                                ],
-                                OutputDataConfig: {
-                                    S3OutputPath: `s3://${this.sagemakerArtifactBucket.bucketName}/output`,
-                                },
-                                ResourceConfig: {
-                                    InstanceType: 'ml.m5.large',
-                                    InstanceCount: 1,
-                                    VolumeSizeInGB: 10,
-                                },
-                                StoppingCondition: {
-                                    MaxRuntimeInSeconds: 3600,
-                                },
-                            },
-                        },
-                        {
-                            Name: 'ManualApprovalStep',
-                            Type: 'Approval',
-                            Description: 'Manual approval step for the model',
-                            DependsOn: ['TrainingStep'],
-                        },
-                    ],
-                }),
-            },
             roleArn: this.sagemakerExecutionRole.roleArn,
+            pipelineDefinition: {
+                PipelineDefinitionBody: `{
+                    "Version": "2020-12-01",
+                    "Parameters": [
+                        {
+                            "Name": "ModelApprovalStatus",
+                            "Type": "String",
+                            "DefaultValue": "PendingManualApproval"
+                        }
+                    ],
+                    "Steps": [
+                        {
+                            "Name": "DummyStep",
+                            "Type": "Condition",
+                            "Arguments": {
+                                "Conditions": [
+                                    {
+                                        "Type": "Equals",
+                                        "LeftValue": "1",
+                                        "RightValue": "1"
+                                    }
+                                ],
+                                "IfSteps": [],
+                                "ElseSteps": []
+                            }
+                        }
+                    ]
+                }`,
+            },
         });
 
         // Get the current stack
